@@ -1,0 +1,135 @@
+﻿// Fill out your copyright notice in the Description page of Project Settings.
+
+
+#include "Characters/Abilities/AbilityTasks/GSAT_WaitInputPressWithTags.h"
+
+#include "AbilitySystemComponent.h"
+
+UGSAT_WaitInputPressWithTags::UGSAT_WaitInputPressWithTags(const FObjectInitializer& ObjectInitializer) : Super(
+	ObjectInitializer)
+{
+	StartTime = 0.0f;
+	bTestInitialState = false;
+}
+
+UGSAT_WaitInputPressWithTags* UGSAT_WaitInputPressWithTags::WaitInputPressWithTags(UGameplayAbility* OwningAbility,
+	FGameplayTagContainer RequiredTags, FGameplayTagContainer IgnoredTags, bool bTestAlreadyPressed)
+{
+	UGSAT_WaitInputPressWithTags* Task = NewAbilityTask<UGSAT_WaitInputPressWithTags>(OwningAbility);
+	Task->bTestInitialState = bTestAlreadyPressed;
+	Task->RequiredTags = RequiredTags;
+	Task->IgnoredTags = IgnoredTags;
+	return Task;
+}
+
+void UGSAT_WaitInputPressWithTags::Activate()
+{
+	StartTime = GetWorld()->GetTimeSeconds();
+	if (Ability)
+	{
+		if (bTestInitialState && IsLocallyControlled())
+		{
+			const FGameplayAbilitySpec* Spec = Ability->GetCurrentAbilitySpec();
+			if (Spec && Spec->InputPressed)
+			{
+				OnPressCallback();
+				return;
+			}
+		}
+
+		DelegateHandle = AbilitySystemComponent->AbilityReplicatedEventDelegate(
+			EAbilityGenericReplicatedEvent::InputPressed, GetAbilitySpecHandle(),
+			GetActivationPredictionKey()).AddUObject(this, &UGSAT_WaitInputPressWithTags::OnPressCallback);
+		
+		if (IsForRemoteClient())
+		{
+			if (!AbilitySystemComponent->CallReplicatedEventDelegateIfSet(
+				EAbilityGenericReplicatedEvent::InputPressed, GetAbilitySpecHandle(), GetActivationPredictionKey()))
+			{
+				SetWaitingOnRemotePlayerData();
+			}
+		}
+	}
+}
+
+void UGSAT_WaitInputPressWithTags::OnPressCallback()
+{
+	float ElapsedTime = GetWorld()->GetTimeSeconds() - StartTime;
+
+	if (!Ability || !AbilitySystemComponent.IsValid())
+	{
+		EndTask();
+		return;
+	}
+	
+	if (AbilitySystemComponent->HasAnyMatchingGameplayTags(IgnoredTags) || !AbilitySystemComponent->
+		HasAllMatchingGameplayTags(RequiredTags))
+	{
+		Reset();
+		return;
+	}
+	
+	if (AbilitySystemComponent->GetTagCount(FGameplayTag::RequestGameplayTag("State.Interacting"))
+		> AbilitySystemComponent->GetTagCount(FGameplayTag::RequestGameplayTag("State.InteractingRemoval")))
+	{
+		Reset();
+		return;
+	}
+
+	AbilitySystemComponent->AbilityReplicatedEventDelegate(EAbilityGenericReplicatedEvent::InputPressed,
+	                                                       GetAbilitySpecHandle(), GetActivationPredictionKey()).Remove(
+		DelegateHandle);
+
+	FScopedPredictionWindow ScopedPrediction(AbilitySystemComponent.Get(), IsPredictingClient());
+
+	if (IsPredictingClient())
+	{
+		AbilitySystemComponent->ServerSetReplicatedEvent(EAbilityGenericReplicatedEvent::InputPressed,
+		                                                 GetAbilitySpecHandle(), GetActivationPredictionKey(),
+		                                                 AbilitySystemComponent->ScopedPredictionKey);
+	}
+	else
+	{
+		AbilitySystemComponent->ConsumeGenericReplicatedEvent(EAbilityGenericReplicatedEvent::InputPressed,
+		                                                      GetAbilitySpecHandle(), GetActivationPredictionKey());
+	}
+	
+	if (ShouldBroadcastAbilityTaskDelegates())
+	{
+		OnPress.Broadcast(ElapsedTime);
+	}
+
+	EndTask();
+}
+
+void UGSAT_WaitInputPressWithTags::OnDestroy(bool AbilityEnded)
+{
+	AbilitySystemComponent->AbilityReplicatedEventDelegate(EAbilityGenericReplicatedEvent::InputPressed,
+	                                                       GetAbilitySpecHandle(), GetActivationPredictionKey()).Remove(
+		DelegateHandle);
+
+	ClearWaitingOnRemotePlayerData();
+
+	Super::OnDestroy(AbilityEnded);
+}
+
+void UGSAT_WaitInputPressWithTags::Reset()
+{
+	AbilitySystemComponent->AbilityReplicatedEventDelegate(EAbilityGenericReplicatedEvent::InputPressed,
+	                                                       GetAbilitySpecHandle(), GetActivationPredictionKey()).Remove(
+		DelegateHandle);
+
+	DelegateHandle = AbilitySystemComponent->AbilityReplicatedEventDelegate(
+		EAbilityGenericReplicatedEvent::InputPressed, GetAbilitySpecHandle(), GetActivationPredictionKey()).AddUObject(
+		this, &UGSAT_WaitInputPressWithTags::OnPressCallback);
+	
+	if (IsForRemoteClient())
+	{
+		if (!AbilitySystemComponent->CallReplicatedEventDelegateIfSet(EAbilityGenericReplicatedEvent::InputPressed,
+		                                                              GetAbilitySpecHandle(),
+		                                                              GetActivationPredictionKey()))
+		{
+			SetWaitingOnRemotePlayerData();
+		}
+	}
+}
